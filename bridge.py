@@ -1734,7 +1734,7 @@ def main():
         print(f"  BG Sound:    (none)")
     print("=" * 60 + "\n")
 
-    app.run(host="0.0.0.0", port=args.port, debug=False)
+    app.run(host="0.0.0.0", port=args.port, debug=True)
 
 
 if __name__ == "__main__":
