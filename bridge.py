@@ -303,6 +303,7 @@ class ExotelSender:
         self._closed = False
         self._lock = threading.Lock()
         self.chunks_sent = 0
+        self._control_queue = Queue()  # NEW
 
     def feed(self, pcm: bytes):
         with self._lock:
@@ -316,9 +317,20 @@ class ExotelSender:
     def close(self):
         self._closed = True
 
+    def send_raw(self, raw_send_fn):
+        """Queue a zero-argument callable that performs a raw ws.send() —
+        executed only by the single writer thread in run()."""
+        self._control_queue.put(raw_send_fn)
+
     def run(self):
         next_send = time.monotonic()
         while not self._closed:
+            while not self._control_queue.empty():
+                try:
+                    fn = self._control_queue.get_nowait()
+                    fn()
+                except Exception as e:
+                    exotel_logger.error(f"Error sending control message: {e}")
             frame = self._next_frame()
             if frame is None:
                 next_send = time.monotonic()
@@ -807,13 +819,17 @@ class ConversationBridge:
             elevenlabs_logger.debug(f"    Full data: {json.dumps(data, indent=2)}")
 
     def _send_clear_to_exotel(self):
-        if self.exotel_ws and self.active:
-            try:
-                message = json.dumps({"event": "clear", "stream_sid": self.stream_sid})
-                self.exotel_ws.send(message)
-                exotel_logger.info(f">>> SEND [clear] - Clearing pending audio")
-            except Exception as e:
-                exotel_logger.error(f"Error sending clear to Exotel: {e}")
+        if self.exotel_ws and self.active and self.exotel_sender:
+
+            def _do_send():
+                try:
+                    message = json.dumps({"event": "clear", "stream_sid": self.stream_sid})
+                    self.exotel_ws.send(message)
+                    exotel_logger.info(f">>> SEND [clear] - Clearing pending audio")
+                except Exception as e:
+                    exotel_logger.error(f"Error sending clear to Exotel: {e}")
+
+            self.exotel_sender.send_raw(_do_send)
 
     def _close_exotel_stream(self):
         """Close the Exotel WebSocket to signal end of stream.
@@ -834,21 +850,25 @@ class ConversationBridge:
                 exotel_logger.error(f"Error closing Exotel WebSocket: {e}")
 
     def _send_mark_to_exotel(self, mark_name: str):
-        if self.exotel_ws and self.active:
+        if self.exotel_ws and self.active and self.exotel_sender:
             self.outbound_sequence += 1
-            try:
-                message = json.dumps(
-                    {
-                        "event": "mark",
-                        "sequence_number": self.outbound_sequence,
-                        "stream_sid": self.stream_sid,
-                        "mark": {"name": mark_name},
-                    }
-                )
-                self.exotel_ws.send(message)
-                exotel_logger.debug(f">>> SEND [mark] - name: {mark_name}")
-            except Exception as e:
-                exotel_logger.error(f"Error sending mark to Exotel: {e}")
+
+            def _do_send():
+                try:
+                    message = json.dumps(
+                        {
+                            "event": "mark",
+                            "sequence_number": self.outbound_sequence,
+                            "stream_sid": self.stream_sid,
+                            "mark": {"name": mark_name},
+                        }
+                    )
+                    self.exotel_ws.send(message)
+                    exotel_logger.debug(f">>> SEND [mark] - name: {mark_name}")
+                except Exception as e:
+                    exotel_logger.error(f"Error sending mark to Exotel: {e}")
+
+            self.exotel_sender.send_raw(_do_send)
 
     def _send_media_to_exotel(self, payload_base64: str):
         """Send a media event to the Exotel WebSocket."""
