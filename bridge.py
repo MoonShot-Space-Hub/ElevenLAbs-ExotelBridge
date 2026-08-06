@@ -137,6 +137,10 @@ logger = logging.getLogger("Bridge")
 exotel_logger = logging.getLogger("Exotel")
 elevenlabs_logger = logging.getLogger("ElevenLabs")
 
+for _name in ("websockets", "websockets.client", "websockets.server",
+              "websockets.protocol", "gevent", "geventwebsocket"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
 app = Flask(__name__)
 sock = Sock(app)
 
@@ -286,6 +290,61 @@ def mix_audio(primary: bytes, background: bytes, bg_volume: float = 0.3) -> byte
     return result
 
 
+class ExotelSender:
+    """Buffers raw PCM and emits fixed-size, 320-byte-aligned frames on a monotonic clock."""
+
+    def __init__(self, send_fn, frame_bytes: int = 3200):
+        assert frame_bytes % 320 == 0, "frame_bytes must be a multiple of 320"
+        self._send_fn = send_fn  # callable(bytes) -> None, does the actual ws.send
+        self.frame_bytes = frame_bytes
+        self.frame_seconds = frame_bytes / 16000.0  # 8000 samples/s * 2 bytes/sample
+        self._buf = bytearray()
+        self._eos = False
+        self._closed = False
+        self._lock = threading.Lock()
+        self.chunks_sent = 0
+
+    def feed(self, pcm: bytes):
+        with self._lock:
+            self._buf.extend(pcm)
+
+    def interrupt(self):
+        with self._lock:
+            self._buf.clear()
+            self._eos = False
+
+    def close(self):
+        self._closed = True
+
+    def run(self):
+        next_send = time.monotonic()
+        while not self._closed:
+            frame = self._next_frame()
+            if frame is None:
+                next_send = time.monotonic()
+                time.sleep(0.01)
+                continue
+            try:
+                self._send_fn(frame)
+                self.chunks_sent += 1
+            except Exception as e:
+                exotel_logger.error(f"Error sending frame to Exotel: {e}")
+            next_send += self.frame_seconds
+            delay = next_send - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            elif delay < -self.frame_seconds:
+                next_send = time.monotonic()
+
+    def _next_frame(self):
+        with self._lock:
+            if len(self._buf) >= self.frame_bytes:
+                frame = bytes(self._buf[: self.frame_bytes])
+                del self._buf[: self.frame_bytes]
+                return frame
+            return None
+
+
 class ElevenLabsClient:
     REGION_URLS = {
         "default": "wss://api.elevenlabs.io",
@@ -413,7 +472,7 @@ class ConversationBridge:
         self.active = False
 
         self.user_audio_buffer = AudioBuffer()
-        self.agent_audio_buffer = AudioBuffer(chunk_size=config.chunk_size)
+        self.exotel_sender: Optional[ExotelSender] = None
 
         self.outbound_sequence = 0
         self.outbound_chunk = 0
@@ -457,7 +516,12 @@ class ConversationBridge:
         self.mark_counter = 0
 
         self.user_audio_buffer = AudioBuffer()
-        self.agent_audio_buffer = AudioBuffer(chunk_size=self.config.chunk_size)
+        self.exotel_sender = ExotelSender(
+            send_fn=lambda frame: self._send_media_to_exotel(
+                base64.b64encode(frame).decode()
+            ),
+            frame_bytes=3200,
+        )
 
         self.bg_mixer = None
         if self.config.bg_sound_file and os.path.isfile(self.config.bg_sound_file):
@@ -487,7 +551,7 @@ class ConversationBridge:
         self.elevenlabs_thread.start()
 
         self.playback_thread = threading.Thread(
-            target=self._playback_agent_audio, daemon=True
+            target=self.exotel_sender.run, daemon=True
         )
         self.playback_thread.start()
 
@@ -666,12 +730,12 @@ class ConversationBridge:
             audio_event = data.get("audio_event", {})
             audio_base64 = audio_event.get("audio_base_64")
             event_id = audio_event.get("event_id")
-            if audio_base64:
+            if audio_base64 and self.exotel_sender:
                 elevenlabs_logger.debug(
                     f"    Audio chunk received (event_id: {event_id}, {len(audio_base64)} b64 chars)"
                 )
-                # Pass base64 directly to buffer (no conversion needed - agent uses same format as Exotel)
-                self.agent_audio_buffer.put(audio_base64)
+                pcm_bytes = base64.b64decode(audio_base64)
+                self.exotel_sender.feed(pcm_bytes)
 
         elif msg_type == "agent_response":
             event = data.get("agent_response_event", {})
@@ -703,7 +767,8 @@ class ConversationBridge:
             elevenlabs_logger.info(f"    User interrupted agent (event_id: {event_id})")
             if self.call_logger:
                 self.call_logger.log_elevenlabs("User interrupted agent")
-            self.agent_audio_buffer.clear()
+            if self.exotel_sender:
+                self.exotel_sender.interrupt()
             self._send_clear_to_exotel()
 
         elif msg_type == "agent_response_correction":
@@ -803,69 +868,6 @@ class ConversationBridge:
         )
         self.exotel_ws.send(message)
 
-    def _playback_agent_audio(self):
-        """Stream audio to Exotel, mixing agent speech with background sound."""
-        exotel_logger.info(
-            "Starting agent audio playback (with background sound mixing)"
-        )
-
-        BYTES_PER_SECOND = 16000  # 8kHz * 2 bytes per sample
-        BG_CHUNK_DURATION_S = 0.02  # 20ms
-        BG_CHUNK_BYTES = int(BYTES_PER_SECOND * BG_CHUNK_DURATION_S)  # 320 bytes
-
-        # Use a shorter poll timeout when background sound is active so we
-        # keep sending ambient audio even while the agent is silent.
-        poll_timeout = BG_CHUNK_DURATION_S if self.bg_mixer else 0.1
-
-        while self.active and self.exotel_ws:
-            audio_base64 = self.agent_audio_buffer.get(timeout=poll_timeout)
-
-            if audio_base64:
-                try:
-                    self.outbound_chunk += 1
-
-                    if self.bg_mixer:
-                        agent_bytes = base64.b64decode(audio_base64)
-                        bg_bytes = self.bg_mixer.get_chunk(len(agent_bytes))
-                        mixed = mix_audio(agent_bytes, bg_bytes, self.bg_mixer.volume)
-                        audio_base64 = base64.b64encode(mixed).decode()
-
-                    self._send_media_to_exotel(audio_base64)
-
-                    if self.outbound_chunk <= 5 or self.outbound_chunk % 20 == 0:
-                        exotel_logger.info(
-                            f">>> SEND [media] chunk={self.outbound_chunk}, "
-                            f"{len(audio_base64)} b64 chars"
-                        )
-
-                    approx_bytes = len(audio_base64) * 3 // 4
-                    chunk_duration = approx_bytes / BYTES_PER_SECOND
-                    time.sleep(chunk_duration * 0.9)
-
-                except Exception as e:
-                    exotel_logger.error(f"Error sending audio to Exotel: {e}")
-
-            elif self.bg_mixer and self.bg_mixer.enabled and self.bg_mixer.volume > 0:
-                # Agent is silent -- keep the ambient sound playing
-                try:
-                    bg_bytes = self.bg_mixer.get_chunk(BG_CHUNK_BYTES)
-                    # Apply volume (bg_bytes is raw PCM, scale each sample)
-                    samples = array.array("h")
-                    samples.frombytes(bg_bytes)
-                    vol = self.bg_mixer.volume
-                    scaled = array.array(
-                        "h",
-                        [max(-32768, min(32767, int(s * vol))) for s in samples],
-                    )
-                    bg_base64 = base64.b64encode(scaled.tobytes()).decode()
-                    self._send_media_to_exotel(bg_base64)
-                except Exception as e:
-                    exotel_logger.error(f"Error sending background audio: {e}")
-
-        exotel_logger.info(
-            f"Agent audio playback stopped (sent {self.outbound_chunk} chunks)"
-        )
-
     def process_exotel_audio(
         self, payload: str, chunk: int = None, timestamp: str = None
     ):
@@ -893,10 +895,10 @@ class ConversationBridge:
 
         self.active = False
 
-        self.agent_audio_buffer.flush()
+        if self.exotel_sender:
+            self.exotel_sender.close()
 
         self.user_audio_buffer.close()
-        self.agent_audio_buffer.close()
 
         if self.loop and self.elevenlabs:
             asyncio.run_coroutine_threadsafe(self.elevenlabs.close(), self.loop)
@@ -1088,8 +1090,8 @@ def _handle_exotel_stream(ws, agent_id_override: Optional[str] = None):
 
             elif event_type == "clear":
                 exotel_logger.info(f"    Clear event received")
-                if bridge:
-                    bridge.agent_audio_buffer.clear()
+                if bridge and bridge.exotel_sender:
+                    bridge.exotel_sender.interrupt()
 
             elif event_type == "stop":
                 stop_data = data.get("stop", {})
