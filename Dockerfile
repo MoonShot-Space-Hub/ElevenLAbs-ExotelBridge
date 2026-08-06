@@ -14,4 +14,4 @@ COPY . .
 EXPOSE 10002
 
 # Run the bridge using gunicorn for production reliability
-CMD ["gunicorn", "--bind", "0.0.0.0:10002", "--worker-class", "gevent", "--workers", "1", "--timeout", "0", "bridge:app"]
+CMD gunicorn --bind 0.0.0.0:${PORT:-10002} --worker-class gevent --workers 1 --timeout 0 --keep-alive 7 bridge:app
