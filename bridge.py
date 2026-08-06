@@ -409,7 +409,7 @@ class ElevenLabsClient:
 
             self.ws = await websockets.connect(
                 self.ws_url,
-                additional_headers=extra_headers,
+                extra_headers=extra_headers,
                 ping_interval=20,
                 ping_timeout=10,
             )
