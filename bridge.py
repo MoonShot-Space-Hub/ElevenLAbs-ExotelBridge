@@ -8,7 +8,6 @@ import array
 import base64
 import signal
 import logging
-import asyncio
 import argparse
 import threading
 import time
@@ -17,7 +16,8 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 
-import websockets
+import gevent
+import websocket
 from flask import Flask, request
 from flask_sock import Sock
 from dotenv import load_dotenv
@@ -121,8 +121,9 @@ class CallLogger:
         self.logger.info(f"Duration: {duration:.2f} seconds")
         self.logger.info("=" * 70)
 
-        self.file_handler.close()
-        self.logger.removeHandler(self.file_handler)
+        if self.file_handler:
+            self.file_handler.close()
+            self.logger.removeHandler(self.file_handler)
 
 
 load_dotenv()
@@ -137,8 +138,7 @@ logger = logging.getLogger("Bridge")
 exotel_logger = logging.getLogger("Exotel")
 elevenlabs_logger = logging.getLogger("ElevenLabs")
 
-for _name in ("websockets", "websockets.client", "websockets.server",
-              "websockets.protocol", "gevent", "geventwebsocket"):
+for _name in ("websocket", "gevent", "geventwebsocket"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 app = Flask(__name__)
@@ -303,7 +303,7 @@ class ExotelSender:
         self._closed = False
         self._lock = threading.Lock()
         self.chunks_sent = 0
-        self._control_queue = Queue()  # NEW
+        self._control_queue = Queue()
 
     def feed(self, pcm: bytes):
         with self._lock:
@@ -319,7 +319,7 @@ class ExotelSender:
 
     def send_raw(self, raw_send_fn):
         """Queue a zero-argument callable that performs a raw ws.send() —
-        executed only by the single writer thread in run()."""
+        executed only by the single writer greenlet in run()."""
         self._control_queue.put(raw_send_fn)
 
     def run(self):
@@ -375,7 +375,7 @@ class ElevenLabsClient:
         self.agent_id = agent_id
         self.api_key = api_key
         self.base_url = self.REGION_URLS.get(region, self.REGION_URLS["default"])
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws = None
         self.conversation_id: Optional[str] = None
         self.connected = False
         self.audio_format_out: Optional[str] = None
@@ -386,11 +386,11 @@ class ElevenLabsClient:
     def ws_url(self) -> str:
         return f"{self.base_url}/v1/convai/conversation?agent_id={self.agent_id}"
 
-    async def connect(self) -> bool:
+    def connect(self) -> bool:
         try:
-            extra_headers = {}
+            header = []
             if self.api_key:
-                extra_headers["xi-api-key"] = self.api_key
+                header = [f"xi-api-key: {self.api_key}"]
 
             elevenlabs_logger.info("=" * 50)
             elevenlabs_logger.info("Connecting to ElevenLabs...")
@@ -403,15 +403,14 @@ class ElevenLabsClient:
             elevenlabs_logger.info("=" * 50)
 
             if self.call_logger:
-                self.call_logger.log_elevenlabs(f"Connecting to ElevenLabs...")
+                self.call_logger.log_elevenlabs("Connecting to ElevenLabs...")
                 self.call_logger.log_elevenlabs(f"URL: {self.ws_url}")
                 self.call_logger.log_elevenlabs(f"Agent ID: {self.agent_id}")
 
-            self.ws = await websockets.connect(
+            self.ws = websocket.create_connection(
                 self.ws_url,
-                extra_headers=extra_headers,
-                ping_interval=20,
-                ping_timeout=10,
+                header=header,
+                enable_multithread=True,
             )
             self.connected = True
             elevenlabs_logger.info("Connected to ElevenLabs successfully!")
@@ -425,21 +424,17 @@ class ElevenLabsClient:
             self.connected = False
             return False
 
-    async def send_audio(self, audio_base64: str):
+    def send_audio(self, audio_base64: str):
         if self.ws and self.connected:
             message = {"user_audio_chunk": audio_base64}
-            elevenlabs_logger.debug(
-                f">>> SEND audio chunk ({len(audio_base64)} chars base64)"
-            )
-            await self.ws.send(json.dumps(message))
+            self.ws.send(json.dumps(message))
 
-    async def send_pong(self, event_id: int):
+    def send_pong(self, event_id: int):
         if self.ws and self.connected:
             message = {"type": "pong", "event_id": event_id}
-            elevenlabs_logger.debug(f">>> SEND pong (event_id: {event_id})")
-            await self.ws.send(json.dumps(message))
+            self.ws.send(json.dumps(message))
 
-    async def send_conversation_config(self, initiation_data: dict = None):
+    def send_conversation_config(self, initiation_data: dict = None):
         """Send conversation initiation client data to ElevenLabs.
 
         Args:
@@ -449,8 +444,6 @@ class ElevenLabsClient:
         """
         if self.ws and self.connected:
             message = {"type": "conversation_initiation_client_data"}
-
-            # Merge in any provided initiation data (dynamic_variables, conversation_config_override)
             if initiation_data:
                 if "dynamic_variables" in initiation_data:
                     message["dynamic_variables"] = initiation_data["dynamic_variables"]
@@ -458,16 +451,27 @@ class ElevenLabsClient:
                     message["conversation_config_override"] = initiation_data[
                         "conversation_config_override"
                     ]
+            elevenlabs_logger.info(">>> SEND conversation_initiation_client_data")
+            self.ws.send(json.dumps(message))
 
-            elevenlabs_logger.info(f">>> SEND conversation_initiation_client_data")
-            elevenlabs_logger.debug(f">>> Config: {json.dumps(message, indent=2)}")
-            await self.ws.send(json.dumps(message))
+    def recv(self, timeout: float = 0.1):
+        """Blocking recv with a timeout. Returns raw message string, or None on timeout."""
+        if not (self.ws and self.connected):
+            return None
+        self.ws.settimeout(timeout)
+        try:
+            return self.ws.recv()
+        except websocket.WebSocketTimeoutException:
+            return None
 
-    async def close(self):
+    def close(self):
         elevenlabs_logger.info("Closing ElevenLabs connection...")
         self.connected = False
         if self.ws:
-            await self.ws.close()
+            try:
+                self.ws.close()
+            except Exception:
+                pass
             self.ws = None
         elevenlabs_logger.info("ElevenLabs connection closed")
 
@@ -492,13 +496,14 @@ class ConversationBridge:
         self.pending_marks: Dict[str, Any] = {}
         self.mark_counter = 0
 
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-
         self.start_time: float = 0
 
         self.bg_mixer: Optional[BackgroundSoundMixer] = None
 
         self.call_logger: Optional[CallLogger] = None
+
+        self.elevenlabs_greenlet = None
+        self.playback_greenlet = None
 
     def start(self, exotel_ws, metadata: StreamMetadata):
         self.exotel_ws = exotel_ws
@@ -511,7 +516,7 @@ class ConversationBridge:
         self.call_logger = CallLogger(
             call_sid=metadata.call_sid, stream_sid=metadata.stream_sid
         )
-        self.call_logger.log_exotel(f"Call started")
+        self.call_logger.log_exotel("Call started")
         self.call_logger.log_exotel(f"From: {metadata.from_number}")
         self.call_logger.log_exotel(f"To: {metadata.to_number}")
         self.call_logger.log_exotel(f"Account SID: {metadata.account_sid}")
@@ -557,44 +562,20 @@ class ConversationBridge:
                         f"Failed to load background sound: {e}", "ERROR"
                     )
 
-        self.elevenlabs_thread = threading.Thread(
-            target=self._run_elevenlabs_client, daemon=True
-        )
-        self.elevenlabs_thread.start()
-
-        self.playback_thread = threading.Thread(
-            target=self.exotel_sender.run, daemon=True
-        )
-        self.playback_thread.start()
+        # Spawn each worker as a gevent greenlet (NOT an OS thread / asyncio loop)
+        self.elevenlabs_greenlet = gevent.spawn(self._run_elevenlabs_client)
+        self.playback_greenlet = gevent.spawn(self.exotel_sender.run)
 
         logger.info(f"Bridge started for stream: {self.stream_sid}")
         self.call_logger.log_bridge(f"Bridge started for stream: {self.stream_sid}")
 
     def _run_elevenlabs_client(self):
-        # Create a NEW isolated event loop for THIS thread only
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-
         try:
-            self.loop.run_until_complete(self._elevenlabs_session())
+            self._elevenlabs_session()
         except Exception as e:
             logger.error(f"ElevenLabs session error: {e}")
-        finally:
-            try:
-                # Cancel any pending tasks before closing
-                pending = asyncio.all_tasks(self.loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    self.loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
-            except Exception:
-                pass
-            finally:
-                self.loop.close()
 
-    async def _elevenlabs_session(self):
+    def _elevenlabs_session(self):
         logger.info("Starting ElevenLabs session...")
         if self.call_logger:
             self.call_logger.log_bridge("Starting ElevenLabs session...")
@@ -606,7 +587,7 @@ class ConversationBridge:
             call_logger=self.call_logger,
         )
 
-        if not await self.elevenlabs.connect():
+        if not self.elevenlabs.connect():
             logger.error("Failed to establish ElevenLabs connection")
             if self.call_logger:
                 self.call_logger.log_bridge(
@@ -622,32 +603,20 @@ class ConversationBridge:
                 "caller_number": self.metadata.from_number or "",
                 "called_number": self.metadata.to_number or "",
                 "call_sid": self.metadata.call_sid or "",
-                # Add defaults for any agent-required dynamic variables
-                "name": "",  # Can be overridden via custom_parameters
-                "recent_history": "",  # Can be overridden via custom_parameters
+                "name": "",
+                "recent_history": "",
             }
-            # Add any custom parameters from Exotel as dynamic variables too
             if self.metadata.custom_parameters:
                 dynamic_vars.update(self.metadata.custom_parameters)
 
-            # Format per ElevenLabs docs: dynamic_variables at top level
-            conversation_initiation_data = {
-                "dynamic_variables": dynamic_vars,
-                # Optional: Add conversation_config_override here if needed
-                # "conversation_config_override": {
-                #     "agent": {
-                #         "first_message": "Hello! I see you're calling from {{caller_number}}.",
-                #         "language": "en"
-                #     }
-                # }
-            }
+            conversation_initiation_data = {"dynamic_variables": dynamic_vars}
             logger.info(f"Passing dynamic variables to agent: {dynamic_vars}")
             if self.call_logger:
                 self.call_logger.log_bridge(
                     f"Dynamic variables: {json.dumps(dynamic_vars)}"
                 )
 
-        await self.elevenlabs.send_conversation_config(conversation_initiation_data)
+        self.elevenlabs.send_conversation_config(conversation_initiation_data)
 
         logger.info("ElevenLabs session active - starting audio streams")
         if self.call_logger:
@@ -655,21 +624,19 @@ class ConversationBridge:
                 "ElevenLabs session active - starting audio streams"
             )
 
-        await asyncio.gather(
-            self._send_audio_to_elevenlabs(),
-            self._receive_from_elevenlabs(),
-            return_exceptions=True,
-        )
+        # Run send + receive concurrently as greenlets, wait for both to finish
+        sender = gevent.spawn(self._send_audio_to_elevenlabs)
+        receiver = gevent.spawn(self._receive_from_elevenlabs)
+        gevent.joinall([sender, receiver])
 
         logger.info("ElevenLabs session ended")
         if self.call_logger:
             self.call_logger.log_bridge("ElevenLabs session ended")
 
-        # Close Exotel WebSocket to trigger transfer flow
-        # When we close, Exotel will proceed to the next applet (Connect)
+        # Close Exotel WebSocket to trigger transfer flow (next applet)
         self._close_exotel_stream()
 
-    async def _send_audio_to_elevenlabs(self):
+    def _send_audio_to_elevenlabs(self):
         """Pass base64 audio directly from Exotel to ElevenLabs (no conversion)."""
         elevenlabs_logger.info(
             "Starting audio passthrough (Exotel -> ElevenLabs) [NO CONVERSION]"
@@ -678,49 +645,46 @@ class ConversationBridge:
 
         while self.active and self.elevenlabs and self.elevenlabs.connected:
             audio_base64 = self.user_audio_buffer.get(timeout=0.05)
-
             if audio_base64:
-                await self.elevenlabs.send_audio(audio_base64)
-                chunks_sent += 1
-
-                if chunks_sent == 1:
-                    elevenlabs_logger.info(
-                        f">>> SEND - First user audio chunk sent to ElevenLabs (passthrough)"
-                    )
-
-            await asyncio.sleep(0.01)
+                try:
+                    self.elevenlabs.send_audio(audio_base64)
+                    chunks_sent += 1
+                    if chunks_sent == 1:
+                        elevenlabs_logger.info(
+                            ">>> SEND - First user audio chunk sent to ElevenLabs (passthrough)"
+                        )
+                except Exception as e:
+                    elevenlabs_logger.error(f"Error sending audio: {e}")
+                    break
 
         elevenlabs_logger.info(f"Audio passthrough stopped (sent {chunks_sent} chunks)")
 
-    async def _receive_from_elevenlabs(self):
-        elevenlabs_logger.info("Starting receiver thread (ElevenLabs -> Bridge)")
+    def _receive_from_elevenlabs(self):
+        elevenlabs_logger.info("Starting receiver (ElevenLabs -> Bridge)")
         messages_received = 0
 
         while self.active and self.elevenlabs and self.elevenlabs.connected:
             try:
-                if self.elevenlabs.ws:
-                    message = await asyncio.wait_for(
-                        self.elevenlabs.ws.recv(), timeout=0.1
-                    )
-                    messages_received += 1
-                    data = json.loads(message)
-                    await self._handle_elevenlabs_message(data)
-            except asyncio.TimeoutError:
-                continue
-            except websockets.ConnectionClosed:
+                message = self.elevenlabs.recv(timeout=0.1)
+                if message is None:
+                    continue
+                messages_received += 1
+                data = json.loads(message)
+                self._handle_elevenlabs_message(data)
+            except websocket.WebSocketConnectionClosedException:
                 elevenlabs_logger.info("ElevenLabs WebSocket connection closed")
                 break
             except json.JSONDecodeError as e:
                 elevenlabs_logger.error(f"JSON decode error: {e}")
             except Exception as e:
                 elevenlabs_logger.error(f"Error receiving from ElevenLabs: {e}")
-                await asyncio.sleep(0.1)
+                break
 
         elevenlabs_logger.info(
             f"Receiver stopped (received {messages_received} messages)"
         )
 
-    async def _handle_elevenlabs_message(self, data: dict):
+    def _handle_elevenlabs_message(self, data: dict):
         msg_type = data.get("type")
 
         if msg_type != "audio":
@@ -784,7 +748,7 @@ class ConversationBridge:
                 f"    Ping received (event_id: {event_id}, ping_ms: {ping_ms})"
             )
             if event_id is not None:
-                await self.elevenlabs.send_pong(event_id)
+                self.elevenlabs.send_pong(event_id)
 
         elif msg_type == "interruption":
             event = data.get("interruption_event", {})
@@ -838,7 +802,7 @@ class ConversationBridge:
                 try:
                     message = json.dumps({"event": "clear", "stream_sid": self.stream_sid})
                     self.exotel_ws.send(message)
-                    exotel_logger.info(f">>> SEND [clear] - Clearing pending audio")
+                    exotel_logger.info(">>> SEND [clear] - Clearing pending audio")
                 except Exception as e:
                     exotel_logger.error(f"Error sending clear to Exotel: {e}")
 
@@ -857,7 +821,6 @@ class ConversationBridge:
                     ">>> This will trigger Exotel to proceed to Connect applet"
                 )
                 self.active = False
-                # Flask-Sock uses .close() without .closed attribute
                 self.exotel_ws.close()
             except Exception as e:
                 exotel_logger.error(f"Error closing Exotel WebSocket: {e}")
@@ -906,7 +869,6 @@ class ConversationBridge:
     ):
         """Pass base64 audio directly to the buffer (no conversion)."""
         if self.active and payload:
-            # Pass base64 directly - no decoding needed since agent uses same format
             self.user_audio_buffer.put(payload)
 
     def process_dtmf(self, digit: str, duration: int = None):
@@ -933,8 +895,11 @@ class ConversationBridge:
 
         self.user_audio_buffer.close()
 
-        if self.loop and self.elevenlabs:
-            asyncio.run_coroutine_threadsafe(self.elevenlabs.close(), self.loop)
+        if self.elevenlabs:
+            try:
+                self.elevenlabs.close()
+            except Exception:
+                pass
 
         if self.call_logger:
             self.call_logger.close()
@@ -1088,7 +1053,7 @@ def _handle_exotel_stream(ws, agent_id_override: Optional[str] = None):
 
                     if media_message_count == 1:
                         exotel_logger.info(
-                            f"<<< RECV [media] - First audio chunk received"
+                            "<<< RECV [media] - First audio chunk received"
                         )
                         exotel_logger.info(f"    Chunk: {chunk}")
                         exotel_logger.info(f"    Timestamp: {timestamp}ms")
@@ -1122,7 +1087,7 @@ def _handle_exotel_stream(ws, agent_id_override: Optional[str] = None):
                     bridge.handle_exotel_mark(mark_name)
 
             elif event_type == "clear":
-                exotel_logger.info(f"    Clear event received")
+                exotel_logger.info("    Clear event received")
                 if bridge and bridge.exotel_sender:
                     bridge.exotel_sender.interrupt()
 
@@ -1150,7 +1115,7 @@ def _handle_exotel_stream(ws, agent_id_override: Optional[str] = None):
             del active_bridges[stream_sid]
 
         exotel_logger.info("=" * 60)
-        exotel_logger.info(f"Connection closed")
+        exotel_logger.info("Connection closed")
         exotel_logger.info(f"    Total messages: {message_count}")
         exotel_logger.info(f"    Media messages: {media_message_count}")
         exotel_logger.info("=" * 60)
@@ -1261,7 +1226,6 @@ def control_bg_sound():
 
 # Store pending transfers from post-call webhooks
 # Key: caller_number (from Exotel's CallFrom)
-# Value: {"team_1": bool, "team_2": bool, "timestamp": float, "conversation_id": str}
 pending_transfers: dict = {}
 
 # Transfer destination phone numbers (configure via environment variables)
@@ -1284,22 +1248,16 @@ def normalize_phone_number(phone: str) -> str:
     if not phone:
         return ""
 
-    # Remove any whitespace and non-digit chars except leading +
     cleaned = phone.strip()
 
-    # Remove leading +
     if cleaned.startswith("+"):
         cleaned = cleaned[1:]
 
-    # Remove digits only
     cleaned = "".join(c for c in cleaned if c.isdigit())
 
-    # Remove India country code (91) if present at start and number is long enough
-    # Indian mobile numbers are 10 digits, so with 91 prefix = 12 digits
     if len(cleaned) == 12 and cleaned.startswith("91"):
         cleaned = cleaned[2:]
 
-    # Remove leading zero (common in local format)
     if cleaned.startswith("0") and len(cleaned) == 11:
         cleaned = cleaned[1:]
 
@@ -1324,27 +1282,6 @@ def handle_post_call_webhook():
     """
     Receive post-call transcription webhook from ElevenLabs.
     Extracts data collection results to determine transfer routing.
-
-    Expected payload structure:
-    {
-        "type": "post_call_transcription",
-        "data": {
-            "conversation_id": "...",
-            "analysis": {
-                "data_collection_results": {
-                    "should_transfer_to_team_1": {"value": "true"/"false"},
-                    "should_transfer_to_team_2": {"value": "true"/"false"}
-                }
-            },
-            "conversation_initiation_client_data": {
-                "dynamic_variables": {
-                    "caller_number": "...",
-                    "called_number": "...",
-                    "call_sid": "..."
-                }
-            }
-        }
-    }
     """
     try:
         payload = request.get_json()
@@ -1371,7 +1308,6 @@ def handle_post_call_webhook():
         data = payload.get("data", {})
         conversation_id = data.get("conversation_id", "unknown")
 
-        # Extract caller number from dynamic variables
         init_data = data.get("conversation_initiation_client_data", {})
         dynamic_vars = init_data.get("dynamic_variables", {})
         caller_number = dynamic_vars.get("caller_number") or dynamic_vars.get(
@@ -1379,15 +1315,12 @@ def handle_post_call_webhook():
         )
         call_sid = dynamic_vars.get("call_sid", "")
 
-        # Extract data collection results
         analysis = data.get("analysis", {})
         data_collection = analysis.get("data_collection_results", {})
 
-        # Get transfer decision - single field with values: "team_1", "team_2", or "none"
         transfer_result = data_collection.get("should_transfer", {})
         transfer_value = (transfer_result.get("value") or "none").strip().lower()
 
-        # Normalize values - accept variations like "Team 1", "team1", "team_1", etc.
         if transfer_value in (
             "team_1",
             "team1",
@@ -1407,22 +1340,17 @@ def handle_post_call_webhook():
             f"  Transfer target: {transfer_target} (raw value: {transfer_value})"
         )
 
-        # Store transfer decision if transfer is needed
         if transfer_target != "none":
-            # Clean up old entries first
             cleanup_old_transfers()
-
-            # Normalize caller number for consistent lookup
             normalized_caller = normalize_phone_number(caller_number)
 
-            # Use normalized caller_number as key for lookup by Programmable Connect
             if normalized_caller:
                 pending_transfers[normalized_caller] = {
                     "transfer_target": transfer_target,
                     "timestamp": time.time(),
                     "conversation_id": conversation_id,
                     "call_sid": call_sid,
-                    "original_number": caller_number,  # Keep original for debugging
+                    "original_number": caller_number,
                 }
                 logger.info(
                     f"Stored pending transfer for caller {caller_number} (normalized: {normalized_caller}) -> {transfer_target}"
@@ -1430,7 +1358,6 @@ def handle_post_call_webhook():
             else:
                 logger.warning("No caller_number found, cannot store transfer decision")
 
-        # Also log transcript summary if available
         transcript_summary = analysis.get("transcript_summary", "")
         if transcript_summary:
             logger.info(f"  Summary: {transcript_summary[:200]}...")
@@ -1446,19 +1373,17 @@ def handle_post_call_webhook():
             )
             logger.info(f"Forwarding to ticket service: {ticket_service_url}")
 
-            # Forward original headers including ElevenLabs signature
             forward_headers = {"Content-Type": "application/json"}
             elevenlabs_sig = request.headers.get(
                 "elevenlabs-signature"
             ) or request.headers.get("ElevenLabs-Signature")
             if elevenlabs_sig:
                 forward_headers["elevenlabs-signature"] = elevenlabs_sig
-                logger.info(f"Forwarding ElevenLabs signature header")
+                logger.info("Forwarding ElevenLabs signature header")
 
-            # Forward the original payload with signature
             ticket_response = http_requests.post(
                 ticket_service_url,
-                data=request.get_data(),  # Use raw data to preserve signature
+                data=request.get_data(),
                 headers=forward_headers,
                 timeout=10,
             )
@@ -1495,42 +1420,24 @@ def handle_programmable_connect():
     """
     Exotel Programmable Connect endpoint.
     Returns transfer destination based on post-call analysis.
-
-    Exotel sends GET request with query params:
-    - CallSid: Unique call identifier
-    - CallFrom: Caller's number
-    - CallTo: Called number (ExoPhone)
-    - Direction: 'incoming' or 'outbound-dial'
-    - etc.
-
-    Returns JSON response for Programmable Connect:
-    {
-        "destination": {"numbers": ["+919812345678"]},
-        "record": true,
-        ...
-    }
     """
     try:
-        # Get Exotel request parameters
         call_sid = request.args.get("CallSid", "")
         call_from = request.args.get("CallFrom", "")
         call_to = request.args.get("CallTo", "")
         direction = request.args.get("Direction", "")
 
-        logger.info(f"Programmable Connect request:")
+        logger.info("Programmable Connect request:")
         logger.info(f"  CallSid: {call_sid}")
         logger.info(f"  CallFrom: {call_from}")
         logger.info(f"  CallTo: {call_to}")
         logger.info(f"  Direction: {direction}")
 
-        # Clean up old entries
         cleanup_old_transfers()
 
-        # Normalize caller number for consistent lookup
         normalized_from = normalize_phone_number(call_from)
         logger.info(f"  Normalized CallFrom: {normalized_from}")
 
-        # Look up pending transfer by normalized caller number
         # Wait up to 10 seconds for post-call webhook to arrive (race condition fix)
         transfer_info = None
         max_wait_seconds = 10
@@ -1548,7 +1455,6 @@ def handle_programmable_connect():
                 logger.info(f"  Waiting for transfer... ({waited:.1f}s)")
 
         if not transfer_info:
-            # No pending transfer found after waiting
             logger.info(
                 f"No pending transfer found for {call_from} (normalized: {normalized_from}) after {max_wait_seconds}s"
             )
@@ -1563,7 +1469,6 @@ def handle_programmable_connect():
                 {"Content-Type": "application/json"},
             )
 
-        # Determine transfer destination based on transfer_target
         destination_number = None
         transfer_target = transfer_info.get("transfer_target", "none")
 
@@ -1578,12 +1483,11 @@ def handle_programmable_connect():
                 f"Routing {call_from} to Team 2 (new booking): {destination_number}"
             )
         else:
-            logger.warning(f"Transfer requested but no destination configured")
+            logger.warning("Transfer requested but no destination configured")
             logger.warning(f"  Transfer target: {transfer_target}")
             logger.warning(f"  Team 1 Number: {TRANSFER_TEAM_1_NUMBER}")
             logger.warning(f"  Team 2 Number: {TRANSFER_TEAM_2_NUMBER}")
 
-        # Remove the pending transfer entry (one-time use)
         del pending_transfers[normalized_from]
 
         if not destination_number:
@@ -1598,7 +1502,6 @@ def handle_programmable_connect():
                 {"Content-Type": "application/json"},
             )
 
-        # Return Programmable Connect response
         response = {
             "fetch_after_attempt": False,
             "destination": {"numbers": [destination_number]},
@@ -1630,8 +1533,7 @@ def list_pending_transfers():
             {
                 "pending_transfers": {
                     k: {
-                        "team_1": v.get("team_1"),
-                        "team_2": v.get("team_2"),
+                        "transfer_target": v.get("transfer_target"),
                         "conversation_id": v.get("conversation_id"),
                         "age_seconds": int(time.time() - v.get("timestamp", 0)),
                     }
@@ -1652,7 +1554,7 @@ def list_pending_transfers():
 def signal_handler(sig, frame):
     logger.info("Shutting down...")
 
-    for bridge in active_bridges.values():
+    for bridge in list(active_bridges.values()):
         bridge.stop()
 
     sys.exit(0)
@@ -1754,7 +1656,7 @@ def main():
     print("  Exotel <-> ElevenLabs Conversational AI Bridge")
     print("=" * 60)
     print(f"  Server:      http://0.0.0.0:{args.port}")
-    print(f"  WebSocket:   ws://0.0.0.0:{args.port}/v1/conversation/exotel")
+    print(f"  WebSocket:   ws://0.0.0.0:{args.port}/v1/convai/conversation/exotel")
     print(f"  Health:      http://0.0.0.0:{args.port}/health")
     print("-" * 60)
     print(f"  Agent ID:    {args.agent_id}")
@@ -1764,7 +1666,7 @@ def main():
     if args.bg_sound_file:
         print(f"  BG Sound:    {args.bg_sound_file} (volume={args.bg_sound_volume})")
     else:
-        print(f"  BG Sound:    (none)")
+        print("  BG Sound:    (none)")
     print("=" * 60 + "\n")
 
     app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)
