@@ -571,6 +571,7 @@ class ConversationBridge:
         self.call_logger.log_bridge(f"Bridge started for stream: {self.stream_sid}")
 
     def _run_elevenlabs_client(self):
+        # Create a NEW isolated event loop for THIS thread only
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
@@ -579,7 +580,19 @@ class ConversationBridge:
         except Exception as e:
             logger.error(f"ElevenLabs session error: {e}")
         finally:
-            self.loop.close()
+            try:
+                # Cancel any pending tasks before closing
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self.loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            finally:
+                self.loop.close()
 
     async def _elevenlabs_session(self):
         logger.info("Starting ElevenLabs session...")
