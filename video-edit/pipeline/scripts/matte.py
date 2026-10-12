@@ -5,7 +5,7 @@ W, H = 1080, 1920
 so = ort.SessionOptions(); so.intra_op_num_threads = 4
 sess = ort.InferenceSession(model, so, providers=['CPUExecutionProvider'])
 dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-i', src, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], stdout=subprocess.PIPE)
-enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', f'{W}x{H}', '-r', '60000/1001', '-i', '-',
+enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', f'{W}x{H}', '-r', (sys.argv[4] if len(sys.argv) > 4 else '60000/1001'), '-i', '-',
                         '-c:v', 'ffv1', '-pix_fmt', 'gray', out], stdin=subprocess.PIPE)
 rec = [np.zeros((1, 1, 1, 1), np.float32)] * 4
 dr = np.array([0.25], np.float32)

@@ -2,8 +2,9 @@
 # across worker processes that each encode a segment; segments are concatenated losslessly at the end.
 import sys, json, subprocess, os, numpy as np, cv2
 cv2.setNumThreads(1)
-W, H = 1080, 1920; FPS = 60000 / 1001
+W, H = 1080, 1920
 cfg = json.load(open(sys.argv[1]))
+FPS_STR = cfg.get('fps', '60000/1001'); _n, _d = (FPS_STR.split('/') + ['1'])[:2]; FPS = float(_n) / float(_d)
 track = json.load(open(cfg['track'])); nsrc = len(track['top'])
 hold = int(round(cfg.get('end_hold', 0) * FPS)); ntot = nsrc + hold
 shots = cfg['shots']
@@ -85,7 +86,7 @@ def worker(a, b, out, lut):
     adec = subprocess.Popen(['ffmpeg', '-v', 'error', '-i', cfg['alpha'], '-vf', sel, '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], stdout=subprocess.PIPE)
     only = cfg.get('only_frames')
     if only is None:
-        enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{W}x{H}', '-r', '60000/1001', '-i', '-',
+        enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{W}x{H}', '-r', FPS_STR, '-i', '-',
                                 '-c:v', 'libx264', '-preset', cfg.get('preset', 'medium'), '-crf', str(cfg.get('crf', 16)), '-pix_fmt', 'yuv420p',
                                 '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-threads', '2', out], stdin=subprocess.PIPE)
     ker3 = np.ones((3, 3), np.uint8); frame = alpha = None

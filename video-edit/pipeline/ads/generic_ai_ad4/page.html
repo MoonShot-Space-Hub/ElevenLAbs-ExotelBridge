@@ -1,0 +1,52 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:'MS';font-weight:500;src:url(node_modules/@fontsource/montserrat/files/montserrat-latin-500-normal.woff2) format('woff2');}
+@font-face{font-family:'MS';font-weight:600;src:url(node_modules/@fontsource/montserrat/files/montserrat-latin-600-normal.woff2) format('woff2');}
+@font-face{font-family:'MS';font-weight:700;src:url(node_modules/@fontsource/montserrat/files/montserrat-latin-700-normal.woff2) format('woff2');}
+@font-face{font-family:'MS';font-weight:800;src:url(node_modules/@fontsource/montserrat/files/montserrat-latin-800-normal.woff2) format('woff2');}
+@font-face{font-family:'MS';font-weight:900;src:url(node_modules/@fontsource/montserrat/files/montserrat-latin-900-normal.woff2) format('woff2');}
+@font-face{font-family:'Deva';font-weight:700;src:url(node_modules/@fontsource/noto-sans-devanagari/files/noto-sans-devanagari-devanagari-700-normal.woff2) format('woff2');}
+@font-face{font-family:'Emoji';src:local('Noto Color Emoji');}
+:root{--navy:#0B1F4D;--navy2:#132B66;--amber:#FFC531;--red:#E5484D;--green:#22C55E;--muted:#C9D3E8;--ink:#0B1F4D;}
+html,body{margin:0;padding:0;width:1080px;height:1920px;background:transparent;overflow:hidden;font-family:'MS',sans-serif;}
+*{box-sizing:border-box;}
+.L{position:absolute;inset:0;}
+.abs{position:absolute;}
+.hide{visibility:hidden!important;}
+/* captions: stroke copy under fill copy (robust outline) */
+.cap{position:absolute;left:80px;width:860px;top:1180px;height:230px;display:flex;align-items:center;justify-content:center;}
+.cap .txt{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);display:block;text-align:center;text-wrap:balance;
+  font-weight:800;font-size:84px;line-height:1.08;letter-spacing:-0.5px;color:#fff;}
+.cap .txt.stroke{color:var(--ink);-webkit-text-stroke:15px var(--ink);filter:drop-shadow(0 5px 10px rgba(0,0,0,.45));}
+.cap .w{display:inline-block;margin:0 0.24em;transform-origin:50% 60%;}
+.card{position:absolute;border-radius:28px;background:rgba(11,31,77,.93);border:2px solid rgba(255,255,255,.16);
+  box-shadow:0 14px 34px rgba(0,0,0,.38);color:#fff;}
+.wcard{position:absolute;border-radius:28px;background:#fff;box-shadow:0 14px 34px rgba(0,0,0,.38);color:var(--ink);}
+.pill{position:absolute;border-radius:999px;display:flex;align-items:center;justify-content:center;white-space:nowrap;}
+.ico{display:inline-block;vertical-align:middle;}
+.ico svg{width:100%;height:100%;display:block;}
+.num{font-variant-numeric:tabular-nums;}
+.emoji{font-family:'Emoji';}
+</style>
+<script src="node_modules/gsap/dist/gsap.min.js"></script>
+<script src="icons.js"></script>
+<script src="captions.js"></script>
+</head><body>
+<div id="back" class="L"></div>
+<div id="front" class="L"></div>
+<script src="engine.js"></script>
+<script src="cues.js"></script>
+<script>
+(async () => {
+  await document.fonts.load('800 84px MS'); await document.fonts.load('900 84px MS'); await document.fonts.load('500 30px MS'); await document.fonts.load('700 30px MS');
+  await document.fonts.ready;
+  const layer = new URLSearchParams(location.search).get('layer') || 'all';
+  if (layer === 'back') document.getElementById('front').classList.add('hide');
+  if (layer === 'front') document.getElementById('back').classList.add('hide');
+  buildAll();
+  window.seek = (t) => { TL.seek(t, false); runHooks(t); return layer === 'back' ? backActive(t) : true; };
+  window.__ready = true;
+})();
+</script>
+</body></html>
