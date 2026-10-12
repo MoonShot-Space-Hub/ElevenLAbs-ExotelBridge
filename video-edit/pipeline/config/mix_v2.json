@@ -1,0 +1,228 @@
+{
+ "duration": 37.34,
+ "speech_end": 35.74,
+ "voice": "work/voice_air.wav",
+ "voice_lufs": -14.5,
+ "music": "work/music_v2.wav",
+ "music_sections": [
+  [
+   0,
+   10.75,
+   19
+  ],
+  [
+   10.75,
+   15.44,
+   23
+  ],
+  [
+   15.44,
+   20.02,
+   19
+  ],
+  [
+   20.02,
+   32.88,
+   18
+  ],
+  [
+   32.88,
+   35.74,
+   16
+  ],
+  [
+   35.74,
+   37.34,
+   11
+  ]
+ ],
+ "sfx_dir": "sfx",
+ "sfx": [
+  {
+   "t": 0.0,
+   "name": "impact",
+   "db": -20,
+   "mono": true
+  },
+  {
+   "t": 2.14,
+   "name": "swoosh_short",
+   "db": -20,
+   "hp": 3000
+  },
+  {
+   "t": 2.3,
+   "name": "counter_roll",
+   "db": -15,
+   "hp": 5000
+  },
+  {
+   "t": 2.98,
+   "name": "ding",
+   "db": -26
+  },
+  {
+   "t": 4.7,
+   "name": "shutter",
+   "db": -15
+  },
+  {
+   "t": 4.98,
+   "name": "swoosh_short",
+   "db": -19,
+   "hp": 3000
+  },
+  {
+   "t": 5.19,
+   "name": "pop",
+   "db": -14,
+   "mono": true
+  },
+  {
+   "t": 6.47,
+   "name": "mouse_click",
+   "db": -11,
+   "mono": true
+  },
+  {
+   "t": 9.94,
+   "name": "scribble",
+   "db": -21,
+   "mono": true
+  },
+  {
+   "t": 10.13,
+   "name": "stamp",
+   "db": -18,
+   "mono": true
+  },
+  {
+   "t": 10.81,
+   "name": "swoosh_short",
+   "db": -19,
+   "hp": 3000
+  },
+  {
+   "t": 12.6,
+   "name": "pop_low",
+   "db": -18,
+   "mono": true
+  },
+  {
+   "t": 14.53,
+   "name": "pop_low",
+   "db": -18,
+   "mono": true
+  },
+  {
+   "t": 14.4,
+   "name": "riser_short",
+   "db": -24,
+   "hp": 2000
+  },
+  {
+   "t": 15.4,
+   "name": "impact",
+   "db": -20,
+   "mono": true
+  },
+  {
+   "t": 15.34,
+   "name": "swoosh_short",
+   "db": -21,
+   "hp": 3000
+  },
+  {
+   "t": 16.68,
+   "name": "tick",
+   "db": -19
+  },
+  {
+   "t": 17.72,
+   "name": "tick",
+   "db": -19
+  },
+  {
+   "t": 18.55,
+   "name": "pop",
+   "db": -20,
+   "mono": true
+  },
+  {
+   "t": 20.0,
+   "name": "swoosh_short",
+   "db": -18,
+   "hp": 3000
+  },
+  {
+   "t": 20.31,
+   "name": "mouse_click",
+   "db": -11,
+   "mono": true
+  },
+  {
+   "t": 23.26,
+   "name": "whoosh",
+   "db": -19,
+   "hp": 3000
+  },
+  {
+   "t": 24.86,
+   "name": "pop",
+   "db": -20,
+   "mono": true
+  },
+  {
+   "t": 27.78,
+   "name": "notification",
+   "db": -19
+  },
+  {
+   "t": 28.68,
+   "name": "pop",
+   "db": -20,
+   "mono": true
+  },
+  {
+   "t": 28.8,
+   "name": "tick",
+   "db": -19
+  },
+  {
+   "t": 28.92,
+   "name": "tick",
+   "db": -19
+  },
+  {
+   "t": 29.04,
+   "name": "tick",
+   "db": -19
+  },
+  {
+   "t": 29.97,
+   "name": "pop_high",
+   "db": -18,
+   "mono": true
+  },
+  {
+   "t": 32.84,
+   "name": "whoosh_deep",
+   "db": -17
+  },
+  {
+   "t": 34.31,
+   "name": "mouse_click",
+   "db": -11,
+   "mono": true
+  },
+  {
+   "t": 35.22,
+   "name": "chime_success",
+   "db": -19
+  }
+ ],
+ "target_lufs": -14.0,
+ "tp_ceiling": -1.5,
+ "out": "/tmp/claude-0/-home-user-ElevenLAbs-ExotelBridge/cc2ef4c0-dbd3-5003-87b4-c73f8e7b585e/scratchpad/work/mix_v2.wav",
+ "stems_dir": "/tmp/claude-0/-home-user-ElevenLAbs-ExotelBridge/cc2ef4c0-dbd3-5003-87b4-c73f8e7b585e/scratchpad/work/stems_v2"
+}
