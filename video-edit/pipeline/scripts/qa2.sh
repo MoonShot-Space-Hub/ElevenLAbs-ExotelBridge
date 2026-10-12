@@ -13,7 +13,7 @@ c['back_dir'] = P+'/work/qa_back'; c['front_dir'] = P+'/work/qa_front'; c['out']
 json.dump(c, open(P+'/work/qa_cfg.json', 'w'))
 PY
 python3 -I $S/scripts/composite2.py $P/work/qa_cfg.json > /dev/null 2>&1
-python3 - "$out" "$P" <<'PY'
+FPSV=$FPSV python3 - "$out" "$P" <<'PY'
 import sys, glob
 from PIL import Image, ImageDraw, ImageFont
 fs = sorted(glob.glob(sys.argv[2]+'/work/qa_comp/p_*.jpg')); W, H = 360, 640; cols = min(6, len(fs)); rows = (len(fs) + cols - 1) // cols
@@ -21,6 +21,6 @@ sheet = Image.new('RGB', (cols * W, rows * H), 'black'); d = ImageDraw.Draw(shee
 font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 22)
 for k, f in enumerate(fs):
     im = Image.open(f).resize((W, H)); x, y = (k % cols) * W, (k // cols) * H; sheet.paste(im, (x, y))
-    i = int(f.split('_')[-1][:5]); d.rectangle([x, y, x + 110, y + 30], fill='black'); d.text((x + 6, y + 3), f'{i/59.94:.2f}s', fill='yellow', font=font)
+    i = int(f.split('_')[-1][:5]); d.rectangle([x, y, x + 110, y + 30], fill='black'); d.text((x + 6, y + 3), f'{i/float(eval(__import__("os").environ.get("FPSV","60000/1001"))):.2f}s', fill='yellow', font=font)
 sheet.save(sys.argv[1], quality=88)
 PY
