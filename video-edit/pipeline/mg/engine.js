@@ -64,7 +64,7 @@ function buildCaptions(groups, hidden = [], opt = {}) {
     if (g.skip) return;
     // clip against hidden ranges
     for (const [a, b] of hidden) { if (t0 >= a && t0 < b) t0 = b; if (t1 > a && t1 <= b) t1 = a; }
-    if (t1 - t0 < 0.08) return;
+    if (t1 - t0 < 0.25) return;   // a sliver left over after clipping is unreadable; skip it
     const box = el('div', 'cap', $front(), { top: (g.top ?? opt.top ?? 1180) + 'px' });
     const mk = (cls) => {
       const d = el('div', 'txt ' + cls, box);
@@ -84,7 +84,8 @@ function buildCaptions(groups, hidden = [], opt = {}) {
       if (fi.getBoundingClientRect().height >= 70 * 1.5) st.style.fontSize = fi.style.fontSize = '82px';
     }
     gsap.set(box, { autoAlpha: 0, transformOrigin: '50% 50%' });
-    TL.fromTo(box, { autoAlpha: 1, scale: 0.9, y: 14 }, { autoAlpha: 1, scale: 1, y: 0, duration: 0.13, ease: 'power2.out', immediateRender: false }, t0);
+    // the pop-in must end before the hide: a tween still running past t1 re-shows the box in sequential playback
+    TL.fromTo(box, { autoAlpha: 1, scale: 0.9, y: 14 }, { autoAlpha: 1, scale: 1, y: 0, duration: Math.min(0.13, t1 - t0 - 0.05), ease: 'power2.out', immediateRender: false }, t0);
     TL.set(box, { autoAlpha: 0 }, t1);
     g.words.forEach((w, wi) => {
       if (!w.kw) return;
